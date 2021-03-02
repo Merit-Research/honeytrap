@@ -322,9 +322,11 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		return nil
 	}
 
-	if hdr.Source == 22 || hdr.Destination == 22 {
+	if hdr.Source == 60022 || hdr.Destination == 60022 {
 		return nil
 	}
+
+
 
 	state := c.stateTable.Get(iph.Src, iph.Dst, hdr.Source, hdr.Destination)
 	if hdr.HasFlag(tcp.SYN) && !hdr.HasFlag(tcp.ACK) {
@@ -346,6 +348,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 				Port: int(hdr.Destination),
 			},
 		)
+
 	}
 
 	if state == nil {
@@ -692,7 +695,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 }
 
 func (c *Canary) send(state *State, payload []byte, flags tcp.Flag) error {
-	// fmt.Printf("Sending packet flags=%d state=%d payload-length=%d\n%s\n", flags, state.State, len(payload), string(debug.Stack()))
+	 // fmt.Printf("Sending packet flags=%d state=%d payload-length=%d\n%s\n", flags, state.State, len(payload), string(debug.Stack()))
 
 	th := &tcp.Header{
 		Source:      state.DestPort,
