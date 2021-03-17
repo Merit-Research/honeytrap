@@ -322,7 +322,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		return nil
 	}
 
-	if hdr.Source == 60022 || hdr.Destination == 60022 || hdr.Source == 5671 || hdr.Destination == 5671 || hdr.Source == 5672 || hdr.Destination == 5672 {
+	if hdr.Source == 60022 || hdr.Destination == 60022 {
 		return nil
 	}
 
