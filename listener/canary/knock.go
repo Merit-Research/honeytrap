@@ -177,7 +177,7 @@ func (c *Canary) knockDetector(ctx context.Context) {
 
 			knock.Knocks.Add(sk)
 
-		case <-time.After(time.Second * 5):
+		case <-time.After(time.Second * 1):
 			now := time.Now()
 
 			knocks.Each(func(i int, v interface{}) {
