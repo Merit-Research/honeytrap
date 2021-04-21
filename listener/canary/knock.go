@@ -184,46 +184,37 @@ func (c *Canary) knockDetector(ctx context.Context) {
 				k := v.(*KnockGroup)
 
 				// TODO(): make duration configurable
-				if k.Count > 100 {
-					// we'll also bail out at a specific count
-					// to prevent ddos
-				} else if k.Last.Add(time.Second * 5).After(now) {
-					return
-				}
-
-				// we have two timeouts, one to send notifications,
-				// one to remove the knock. This will detect portscans
-				// with a longer interval
-
-				// TODO(): make duration configurable
-				if k.Last.Add(time.Second * 60).After(now) {
+				// Remove / expire knock group if older than 600 secs
+				// We also report the portscan in the events channel
+				if k.Last.Add(time.Second * 600).Before(now) { // last + 600 < now <=> 600 < now - last =: age
 					defer knocks.Remove(k)
+
+					ports := make([]string, k.Knocks.Count())
+
+					k.Knocks.Each(func(i int, v interface{}) {
+						if k, ok := v.(KnockTCPPort); ok {
+							ports[i] = fmt.Sprintf("tcp/%d", k.DestinationPort)
+						} else if k, ok := v.(KnockUDPPort); ok {
+							ports[i] = fmt.Sprintf("udp/%d", k.DestinationPort)
+						} else if _, ok := v.(KnockICMP); ok {
+							ports[i] = "icmp"
+						}
+					})
+
+					c.events.Send(
+						event.New(
+							CanaryOptions,
+							EventCategoryPortscan,
+							event.SourceHardwareAddr(k.SourceHardwareAddr),
+							event.DestinationHardwareAddr(k.DestinationHardwareAddr),
+							event.SourceIP(k.SourceIP),
+							event.DestinationIP(k.DestinationIP),
+							event.Custom("portscan.ports", ports),
+							event.Custom("portscan.knocks", k.Count),
+							event.Custom("portscan.duration", k.Last.Sub(k.Start)),
+						),
+					)
 				}
-
-				ports := make([]string, k.Knocks.Count())
-
-				k.Knocks.Each(func(i int, v interface{}) {
-					if k, ok := v.(KnockTCPPort); ok {
-						ports[i] = fmt.Sprintf("tcp/%d", k.DestinationPort)
-					} else if k, ok := v.(KnockUDPPort); ok {
-						ports[i] = fmt.Sprintf("udp/%d", k.DestinationPort)
-					} else if _, ok := v.(KnockICMP); ok {
-						ports[i] = "icmp"
-					}
-				})
-
-				c.events.Send(
-					event.New(
-						CanaryOptions,
-						EventCategoryPortscan,
-						event.SourceHardwareAddr(k.SourceHardwareAddr),
-						event.DestinationHardwareAddr(k.DestinationHardwareAddr),
-						event.SourceIP(k.SourceIP),
-						event.DestinationIP(k.DestinationIP),
-						event.Custom("portscan.ports", ports),
-						event.Custom("portscan.duration", k.Last.Sub(k.Start)),
-					),
-				)
 			})
 		}
 	}

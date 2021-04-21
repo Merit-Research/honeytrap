@@ -55,8 +55,8 @@ var (
 )
 
 var (
-	// EventCategoryARP
 	EventCategoryARP = event.Category("arp")
+	EventCategoryICMP = event.Category("icmp")
 )
 
 // first dns
@@ -194,12 +194,12 @@ func (c *Canary) handleUDP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		}()
 
 		handlers := map[uint16]func(*ipv4.Header, *udp.Header) error{
-			53:   c.DecodeDNS,
-			123:  c.DecodeNTP,
-			1900: c.DecodeSSDP,
-			5060: c.DecodeSIP,
-			161:  c.DecodeSNMP,
-			162:  c.DecodeSNMPTrap,
+		//	53:   c.DecodeDNS,
+		//	123:  c.DecodeNTP,
+		//	1900: c.DecodeSSDP,
+		//	5060: c.DecodeSIP,
+		//	161:  c.DecodeSNMP,
+		//	162:  c.DecodeSNMPTrap,
 		}
 
 		if fn, ok := handlers[hdr.Destination]; !ok {
@@ -242,7 +242,7 @@ func (c *Canary) handleUDP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 
 // handleICMP will handle tcp packets
 func (c *Canary) handleICMP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) error {
-	_, err := icmp.Parse(data)
+	i, err := icmp.Parse(data)
 	if err != nil {
 		return err
 	}
@@ -257,6 +257,25 @@ func (c *Canary) handleICMP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) e
 		SourceIP:                iph.Src,
 		DestinationIP:           iph.Dst,
 	}
+
+        // fmt.Println("type=%s, checksum=%d, id=%d, seq=%d", i.TypeCode.String(), i.Checksum, i.ID, i.Seq)
+
+	c.events.Send(event.New(
+		SensorCanary,
+		EventCategoryICMP,
+
+		event.Protocol("icmp"),
+		event.SourceHardwareAddr(eh.Source),
+		event.DestinationHardwareAddr(eh.Destination),
+
+		event.Custom("icmp.typecode", i.TypeCode.String()),
+		event.Custom("icmp.checksum", i.Checksum),
+		event.Custom("icmp.ID", i.ID),
+		event.Custom("icmp.seq", i.Seq),
+		event.SourceIP(iph.Src),
+		event.DestinationIP(iph.Dst),
+		event.Payload(data),
+	))
 
 	return nil
 }
@@ -326,10 +345,16 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		return nil
 	}
 
-
-
 	state := c.stateTable.Get(iph.Src, iph.Dst, hdr.Source, hdr.Destination)
 	if hdr.HasFlag(tcp.SYN) && !hdr.HasFlag(tcp.ACK) {
+		// Send the TCP knock
+		c.knockChan <- KnockTCPPort{
+			SourceHardwareAddr:      eh.Source,
+			DestinationHardwareAddr: eh.Destination,
+			SourceIP:                iph.Src,
+			DestinationIP:           iph.Dst,
+			DestinationPort:         hdr.Destination,
+		}
 		// no state found
 		state = c.NewState(iph.Src, hdr.Source, iph.Dst, hdr.Destination)
 		state.State = SocketListen
@@ -348,6 +373,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 				Port: int(hdr.Destination),
 			},
 		)
+
+		state.SrcHardwareAddr = eh.Source
+		state.DestHardwareAddr = eh.Destination
 
 	}
 
@@ -382,7 +410,6 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	}
 
 	// check sequence number
-
 	switch {
 	case hdr.HasFlag(tcp.RST):
 		if state.State == SocketSynReceived {
@@ -501,14 +528,14 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 
 			// we can check als for signaturs to use specifiec protocol
 			handlers := map[uint16]func(net.Conn) error{
-				23:   c.DecodeTelnet,
-				80:   c.DecodeHTTP,
-				443:  c.DecodeHTTPS,
-				139:  c.DecodeNBTIP,
-				445:  c.DecodeSMBIP,
-				1433: c.DecodeMSSQL,
-				6379: c.DecodeRedis,
-				9200: c.DecodeElasticsearch,
+			//	23:   c.DecodeTelnet,
+			//	80:   c.DecodeHTTP,
+			//	443:  c.DecodeHTTPS,
+			//	139:  c.DecodeNBTIP,
+			//	445:  c.DecodeSMBIP,
+			//	1433: c.DecodeMSSQL,
+			//	6379: c.DecodeRedis,
+			//	9200: c.DecodeElasticsearch,
 			}
 
 			if fn, ok := handlers[hdr.Destination]; !ok {
@@ -621,16 +648,6 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		}
 	}
 
-	if hdr.Ctrl&tcp.SYN == tcp.SYN {
-		c.knockChan <- KnockTCPPort{
-			SourceHardwareAddr:      eh.Source,
-			DestinationHardwareAddr: eh.Destination,
-			SourceIP:                iph.Src,
-			DestinationIP:           iph.Dst,
-			DestinationPort:         hdr.Destination,
-		}
-	}
-
 	if hdr.Ctrl&tcp.FIN == tcp.FIN {
 		// If the FIN bit is set, signal the user "connection closing" and
 		// return any pending RECEIVEs with same message, advance RCV.NXT
@@ -692,6 +709,19 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	*/
 	// check if we have tcp listeners on specified port, and answer otherwise
 	return nil
+}
+
+func (c *Canary) tcpTimeoutDetector(ctx context.Context) {
+
+        for {
+                select {
+                case <-ctx.Done():
+                        return
+
+                case <-time.After(time.Second * 5):
+			c.stateTable.Expire()
+		}
+	}
 }
 
 func (c *Canary) send(state *State, payload []byte, flags tcp.Flag) error {
@@ -1024,6 +1054,8 @@ func (c *Canary) transmit(fd int32) error {
 //Start will start Canary
 func (c *Canary) Start(ctx context.Context) error {
 	go c.knockDetector(ctx)
+
+	go c.tcpTimeoutDetector(ctx)
 
 	go func() {
 		<-ctx.Done()

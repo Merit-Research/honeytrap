@@ -20,8 +20,10 @@ import (
 	"net"
 	"sync"
 	"time"
+	//"fmt"
 
 	"github.com/honeytrap/honeytrap/listener/canary/tcp"
+	"github.com/honeytrap/honeytrap/event"
 )
 
 // State defines a struct for holding connection data and address.
@@ -31,9 +33,11 @@ type State struct {
 
 	m sync.Mutex
 
+	SrcHardwareAddr      net.HardwareAddr
 	SrcIP   net.IP
 	SrcPort uint16
 
+	DestHardwareAddr      net.HardwareAddr
 	DestIP   net.IP
 	DestPort uint16
 
@@ -139,6 +143,45 @@ func (st *StateTable) Add(state *State) {
 	// we don't have enough space in the state table, and
 	// there are no inactive entries
 	panic("Statetable full")
+}
+
+// Expire removes inactive states from the table.
+// We focus only on SynReceived states.
+func (st *StateTable) Expire() {
+
+	now := time.Now()
+
+	for i := range *st {
+		if (*st)[i] == nil {
+			// empty slot
+		} else if now.Sub((*st)[i].t) > 30*time.Second  &&
+		     (*st)[i].State == SocketSynReceived {
+			// inactive
+			//fmt.Println((*st)[i].SrcIP, (*st)[i].SrcPort, (*st)[i].DestIP, (*st)[i].DestPort)
+
+			// Send the event to our subscribers 
+			(*st)[i].c.events.Send(event.New(
+				CanaryOptions,
+				EventCategoryTCP,
+				event.ConnectionOpened,
+
+				event.SourceHardwareAddr((*st)[i].SrcHardwareAddr),
+				event.DestinationHardwareAddr((*st)[i].DestHardwareAddr),
+
+				event.SourceIP((*st)[i].SrcIP),
+				event.DestinationIP((*st)[i].DestIP),
+				event.SourcePort((*st)[i].SrcPort),
+				event.DestinationPort((*st)[i].DestPort),
+				// event.Payload(buff[:n]),
+			))
+
+			// Remove the state
+			(*st)[i] = nil
+		} else {
+			continue
+		}
+
+	}
 }
 
 // Get will return the state for the ip, port combination
