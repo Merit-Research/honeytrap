@@ -124,7 +124,7 @@ type Canary struct {
 
 	descriptors map[string]int32
 
-	buffer *rbuf.FixedSizeRingBuf
+	buffer *rbuf.AtomicFixedSizeRingBuf
 
 	stateTable StateTable
 
@@ -330,6 +330,8 @@ func (c *Canary) isMe(ip net.IP) bool {
 
 // handleTCP will handle tcp packets
 func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) error {
+
+
 	hdr, err := tcp.UnmarshalWithChecksum(data, iph.Dst, iph.Src)
 	if err == tcp.ErrInvalidChecksum {
 		// we are ignoring invalid checksums for now
@@ -389,7 +391,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	state.m.Lock()
 	defer state.m.Unlock()
 
+        StateTableMutex.Lock()
 	state.t = time.Now()
+        StateTableMutex.Unlock()
 
 	// https://tools.ietf.org/html/rfc793
 	// page 65
@@ -708,6 +712,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		}
 	*/
 	// check if we have tcp listeners on specified port, and answer otherwise
+
 	return nil
 }
 
@@ -835,8 +840,10 @@ func (c *Canary) send(state *State, payload []byte, flags tcp.Flag) error {
 
 	data = append(data2, data...)
 
+	//c.m.Lock() REMOVE?
 	c.buffer.Write([]byte{byte((len(data) & 0xFF00) >> 8), byte(len(data) & 0xFF)})
 	c.buffer.Write(data)
+	//c.m.Unlock()
 
 	fd := c.descriptors[ae.Interface]
 
@@ -924,7 +931,7 @@ func New(options ...func(listener.Listener) error) (listener.Listener, error) {
 		events:            pushers.MustDummy(),
 		m:                 sync.Mutex{},
 		ch:                ch,
-		buffer:            rbuf.NewFixedSizeRingBuf(65535),
+		buffer:            rbuf.NewAtomicFixedSizeRingBuf(65535),
 	}
 
 	for _, option := range options {
@@ -1019,7 +1026,10 @@ func (c *Canary) transmit(fd int32) error {
 	for {
 		buff := [2]byte{}
 
+		//c.m.Lock() REMOVE?
 		_, err := c.buffer.ReadAndMaybeAdvance(buff[:], true)
+		//c.m.Unlock()
+
 		if err == io.EOF {
 			break
 		} else if err != nil {
@@ -1030,7 +1040,11 @@ func (c *Canary) transmit(fd int32) error {
 		len := uint32(buff[0])<<8 + uint32(buff[1])
 
 		buffer := make([]byte, len)
+
+		//c.m.Lock() REMOVE?
 		n, err := c.buffer.Read(buffer)
+		//c.m.Unlock()
+
 		if err != nil {
 			log.Errorf("Error reading buffer 2: %s", err)
 			return err

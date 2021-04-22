@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"time"
+//	"sync"
 
 	"github.com/glycerine/rbuf"
 )
@@ -79,12 +80,13 @@ type Socket struct {
 
 	rchan chan interface{}
 
-	rbuffer *rbuf.FixedSizeRingBuf
-	wbuffer *rbuf.FixedSizeRingBuf
+	rbuffer *rbuf.AtomicFixedSizeRingBuf
+	wbuffer *rbuf.AtomicFixedSizeRingBuf
 
 	closed bool
 
 	state *State
+//	m sync.Mutex
 }
 
 // LocalAddr returns local net.Addr.
@@ -111,11 +113,15 @@ func (s Socket) flush() {
 
 func (s Socket) Read(p []byte) (n int, err error) {
 	if !s.closed {
-	} else if s.rbuffer.Avail() == 0 {
+	//} else if s.rbuffer.Avail() == 0 {
+	} else if s.rbuffer.Readable() == 0 { // Using Readable() for AtomicFixedSizeRingBuf instead of Avail() 
 		return 0, io.EOF
 	}
 
+	//s.m.Lock() REMOVE?
 	n, _ = s.rbuffer.Read(p)
+	//s.m.Unlock()
+
 	if n > 0 {
 		return
 	}
@@ -133,7 +139,9 @@ func (s Socket) Read(p []byte) (n int, err error) {
 }
 
 func (s Socket) write(p []byte) (n int, err error) {
+	//s.m.Lock() REMOVE?
 	s.rbuffer.Write(p)
+	//s.m.Unlock()
 	return len(p), nil
 }
 
@@ -176,9 +184,7 @@ func (state *State) NewSocket(src, dst net.Addr) *Socket {
 
 		rchan: make(chan interface{}),
 
-		// rbuffer: rbuf.NewFixedSizeRingBuf(65535),
-		// wbuffer: rbuf.NewFixedSizeRingBuf(65535),
-		rbuffer: rbuf.NewFixedSizeRingBuf(4096),
+		rbuffer: rbuf.NewAtomicFixedSizeRingBuf(4096),
 		wbuffer: nil, /*rbuf.NewFixedSizeRingBuf(10000), */
 
 		closed: false,

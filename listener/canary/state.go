@@ -99,6 +99,8 @@ func (s *State) close() {
 	// instead to write queue or buffer
 	s.m.Lock()
 	defer s.m.Unlock()
+	StateTableMutex.Lock()
+	defer StateTableMutex.Unlock()
 
 	// Queue this until all preceding SENDs have been segmentized, then
 	// form a FIN segment and send it.  In any case, enter FIN-WAIT-1
@@ -112,8 +114,16 @@ func (s *State) close() {
 // StateTable defines a slice of States type.
 type StateTable [65535]*State
 
+var (
+	StateTableMutex sync.Mutex
+)
+
 // Add adds the state into the table.
 func (st *StateTable) Add(state *State) {
+
+	StateTableMutex.Lock()
+	defer StateTableMutex.Unlock()
+
 	for i := range *st {
 		if (*st)[i] == nil {
 			// slot not taken
@@ -151,10 +161,16 @@ func (st *StateTable) Expire() {
 
 	now := time.Now()
 
+	StateTableMutex.Lock()
+	defer StateTableMutex.Unlock()
+
 	for i := range *st {
 		if (*st)[i] == nil {
 			// empty slot
-		} else if now.Sub((*st)[i].t) > 30*time.Second  &&
+			continue
+		}
+
+		if now.Sub((*st)[i].t) > 30*time.Second  &&
 		     (*st)[i].State == SocketSynReceived {
 			// inactive
 			//fmt.Println((*st)[i].SrcIP, (*st)[i].SrcPort, (*st)[i].DestIP, (*st)[i].DestPort)
@@ -177,8 +193,6 @@ func (st *StateTable) Expire() {
 
 			// Remove the state
 			(*st)[i] = nil
-		} else {
-			continue
 		}
 
 	}
@@ -186,6 +200,9 @@ func (st *StateTable) Expire() {
 
 // Get will return the state for the ip, port combination
 func (st *StateTable) Get(SrcIP, DestIP net.IP, SrcPort, DestPort uint16) *State {
+	StateTableMutex.Lock()
+	defer StateTableMutex.Unlock()
+
 	for _, state := range *st {
 		if state == nil {
 			continue
@@ -215,6 +232,9 @@ func (st *StateTable) Get(SrcIP, DestIP net.IP, SrcPort, DestPort uint16) *State
 }
 
 func (st *StateTable) Remove(s *State) {
+	StateTableMutex.Lock()
+	defer StateTableMutex.Unlock()
+
 	for i := range *st {
 		if (*st)[i] != s {
 			continue
