@@ -114,9 +114,13 @@ type Canary struct {
 
 	m sync.Mutex
 
+	knocksMutex sync.Mutex
+
 	r *rand.Rand
 
 	knockChan chan interface{}
+
+	knocks *UniqueSet
 
 	networkInterfaces []net.Interface
 
@@ -350,13 +354,13 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	state := c.stateTable.Get(iph.Src, iph.Dst, hdr.Source, hdr.Destination)
 	if hdr.HasFlag(tcp.SYN) && !hdr.HasFlag(tcp.ACK) {
 		// Send the TCP knock
-		//c.knockChan <- KnockTCPPort{
-		//	SourceHardwareAddr:      eh.Source,
-		//	DestinationHardwareAddr: eh.Destination,
-		//	SourceIP:                iph.Src,
-		//	DestinationIP:           iph.Dst,
-		//	DestinationPort:         hdr.Destination,
-		//}
+		c.knockChan <- KnockTCPPort{
+			SourceHardwareAddr:      eh.Source,
+			DestinationHardwareAddr: eh.Destination,
+			SourceIP:                iph.Src,
+			DestinationIP:           iph.Dst,
+			DestinationPort:         hdr.Destination,
+		}
 		// no state found
 		state = c.NewState(iph.Src, hdr.Source, iph.Dst, hdr.Destination)
 		StateTableMutex.Lock()
@@ -753,6 +757,63 @@ func (c *Canary) tcpTimeoutDetector(ctx context.Context) {
 	}
 }
 
+func (c *Canary) knockTimeoutDetector(ctx context.Context) {
+
+        for {
+                select {
+                case <-ctx.Done():
+                        return
+
+                case <-time.After(time.Second * 600):
+                        now := time.Now()
+
+			fmt.Println("Waking up to check for knocks that have timed-out.")
+			expired := 0
+			// Protecting the knocks set with the c.knocksMutex lock
+			c.knocksMutex.Lock()
+                        c.knocks.Each(func(i int, v interface{}) {
+                                k := v.(*KnockGroup)
+
+                                // Remove / expire knock group if older than 600 secs
+                                // We also report the portscan in the events channel
+                                if k.Last.Add(time.Second * 600).Before(now) { // last + 600 < now <=> 600 < now - last =: age
+					expired++
+                                        defer c.knocks.Remove(k)
+
+                                        ports := make([]string, k.Knocks.Count())
+
+                                        k.Knocks.Each(func(i int, v interface{}) {
+                                                if k, ok := v.(KnockTCPPort); ok {
+                                                        ports[i] = fmt.Sprintf("tcp/%d", k.DestinationPort)
+                                                } else if k, ok := v.(KnockUDPPort); ok {
+                                                        ports[i] = fmt.Sprintf("udp/%d", k.DestinationPort)
+                                                } else if _, ok := v.(KnockICMP); ok {
+                                                        ports[i] = "icmp"
+                                                }
+                                        })
+
+                                        c.events.Send(
+                                                event.New(
+                                                        CanaryOptions,
+                                                        EventCategoryPortscan,
+                                                        event.SourceHardwareAddr(k.SourceHardwareAddr),
+                                                        event.DestinationHardwareAddr(k.DestinationHardwareAddr),
+                                                        event.SourceIP(k.SourceIP),
+                                                        event.DestinationIP(k.DestinationIP),
+                                                        event.Custom("portscan.ports", ports),
+                                                        event.Custom("portscan.knocks", k.Count),
+                                                        event.Custom("portscan.duration", k.Last.Sub(k.Start)),
+                                                ),
+                                        )
+                                }
+                        })
+			fmt.Println("knocks that have timed-out: ", expired)
+			c.knocksMutex.Unlock()
+
+                }
+        }
+}
+
 func (c *Canary) send(state *State, payload []byte, flags tcp.Flag) error {
 	 // fmt.Printf("Sending packet flags=%d state=%d payload-length=%d\n%s\n", flags, state.State, len(payload), string(debug.Stack()))
 
@@ -1088,6 +1149,8 @@ func (c *Canary) Start(ctx context.Context) error {
 	go c.knockDetector(ctx)
 
 	go c.tcpTimeoutDetector(ctx)
+
+	go c.knockTimeoutDetector(ctx)
 
 	go func() {
 		<-ctx.Done()

@@ -19,7 +19,7 @@ package canary
 import (
 	"bytes"
 	"context"
-	"fmt"
+	//"fmt"
 	"net"
 	"time"
 
@@ -30,6 +30,7 @@ var (
 	// EventCategoryPortscan contains events for ssdp traffic
 	EventCategoryPortscan = event.Category("portscan")
 )
+
 
 // KnockGroup groups multiple knocks
 type KnockGroup struct {
@@ -155,7 +156,7 @@ func (k KnockICMP) NewGroup() *KnockGroup {
 }
 
 func (c *Canary) knockDetector(ctx context.Context) {
-	knocks := NewUniqueSet(func(v1, v2 interface{}) bool {
+	c.knocks = NewUniqueSet(func(v1, v2 interface{}) bool {
 		k1, k2 := v1.(*KnockGroup), v2.(*KnockGroup)
 		return k1.Protocol == k2.Protocol &&
 			bytes.Equal(k1.SourceHardwareAddr, k2.SourceHardwareAddr) &&
@@ -169,25 +170,29 @@ func (c *Canary) knockDetector(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case sk := <-c.knockChan:
+			// Protecting the knocks set with knocksMutex
+			c.knocksMutex.Lock()
 			grouper := sk.(KnockGrouper)
-			knock := knocks.Add(grouper.NewGroup()).(*KnockGroup)
+			knock := c.knocks.Add(grouper.NewGroup()).(*KnockGroup)
 
 			knock.Count++
 			knock.Last = time.Now()
 
 			knock.Knocks.Add(sk)
 
+			c.knocksMutex.Unlock()
+		/*
 		case <-time.After(time.Second * 1):
 			now := time.Now()
 
-			knocks.Each(func(i int, v interface{}) {
+			c.knocks.Each(func(i int, v interface{}) {
 				k := v.(*KnockGroup)
 
 				// TODO(): make duration configurable
 				// Remove / expire knock group if older than 600 secs
 				// We also report the portscan in the events channel
 				if k.Last.Add(time.Second * 600).Before(now) { // last + 600 < now <=> 600 < now - last =: age
-					defer knocks.Remove(k)
+					defer c.knocks.Remove(k)
 
 					ports := make([]string, k.Knocks.Count())
 
@@ -216,6 +221,7 @@ func (c *Canary) knockDetector(ctx context.Context) {
 					)
 				}
 			})
+		 */
 		}
 	}
 }
