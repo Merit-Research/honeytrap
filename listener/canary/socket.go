@@ -118,9 +118,7 @@ func (s Socket) Read(p []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	//s.m.Lock() REMOVE?
 	n, _ = s.rbuffer.Read(p)
-	//s.m.Unlock()
 
 	if n > 0 {
 		return
@@ -139,9 +137,7 @@ func (s Socket) Read(p []byte) (n int, err error) {
 }
 
 func (s Socket) write(p []byte) (n int, err error) {
-	//s.m.Lock() REMOVE?
 	s.rbuffer.Write(p)
-	//s.m.Unlock()
 	return len(p), nil
 }
 

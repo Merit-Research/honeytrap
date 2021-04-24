@@ -350,16 +350,18 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	state := c.stateTable.Get(iph.Src, iph.Dst, hdr.Source, hdr.Destination)
 	if hdr.HasFlag(tcp.SYN) && !hdr.HasFlag(tcp.ACK) {
 		// Send the TCP knock
-		c.knockChan <- KnockTCPPort{
-			SourceHardwareAddr:      eh.Source,
-			DestinationHardwareAddr: eh.Destination,
-			SourceIP:                iph.Src,
-			DestinationIP:           iph.Dst,
-			DestinationPort:         hdr.Destination,
-		}
+		//c.knockChan <- KnockTCPPort{
+		//	SourceHardwareAddr:      eh.Source,
+		//	DestinationHardwareAddr: eh.Destination,
+		//	SourceIP:                iph.Src,
+		//	DestinationIP:           iph.Dst,
+		//	DestinationPort:         hdr.Destination,
+		//}
 		// no state found
 		state = c.NewState(iph.Src, hdr.Source, iph.Dst, hdr.Destination)
+		StateTableMutex.Lock()
 		state.State = SocketListen
+		StateTableMutex.Unlock()
 		c.stateTable.Add(state)
 
 		// or is state == socket?
@@ -408,7 +410,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			state.RecvNext++
 			c.send(state, []byte{}, tcp.SYN|tcp.ACK)
 			state.SendNext++
+			StateTableMutex.Lock()
 			state.State = SocketSynReceived
+			StateTableMutex.Unlock()
 			return nil
 		}
 	}
@@ -418,7 +422,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	case hdr.HasFlag(tcp.RST):
 		if state.State == SocketSynReceived {
 			// enter listen state
+			StateTableMutex.Lock()
 			state.State = SocketListen
+			StateTableMutex.Unlock()
 			return nil
 		}
 
@@ -432,7 +438,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			// flushed.  Users should also receive an unsolicited general
 			// "connection reset" signal.  Enter the CLOSED state, delete the
 			// TCB, and return.
+			StateTableMutex.Lock()
 			state.State = SocketClosed
+			StateTableMutex.Unlock()
 
 			c.stateTable.Remove(state)
 			return nil
@@ -441,7 +449,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		case SocketTimeWait:
 			// If the RST bit is set then, enter the CLOSED state, delete the
 			// TCB, and return.
+			StateTableMutex.Lock()
 			state.State = SocketClosed
+			StateTableMutex.Unlock()
 
 			c.stateTable.Remove(state)
 			return nil
@@ -482,7 +492,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	}
 
 	if state.State == SocketClosing {
+		StateTableMutex.Lock()
 		state.State = SocketTimeWait
+		StateTableMutex.Unlock()
 	}
 
 	if state.State == SocketCloseWait {
@@ -492,7 +504,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	if state.State == SocketSynReceived {
 		if state.SendUnacknowledged <= hdr.AckNum &&
 			hdr.AckNum <= state.SendNext {
+			StateTableMutex.Lock()
 			state.State = SocketEstablished
+			StateTableMutex.Unlock()
 		} else {
 			// If the segment acknowledgment is not acceptable, form a
 			// reset segment,
@@ -619,9 +633,13 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		// In addition to the processing for the ESTABLISHED state, if
 		// our FIN is now acknowledged then enter FIN-WAIT-2 and continue
 		// processing in that state.
+		StateTableMutex.Lock()
 		state.State = SocketFinWait2
+		StateTableMutex.Unlock()
 	} else if state.State == SocketFinWait2 {
+		StateTableMutex.Lock()
 		state.State = SocketTimeWait
+		StateTableMutex.Unlock()
 	}
 
 	if state.State == SocketEstablished ||
@@ -670,14 +688,18 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			c.send(state, []byte{}, tcp.FIN|tcp.ACK)
 			state.SendNext++
 
+			StateTableMutex.Lock()
 			state.State = SocketCloseWait
+			StateTableMutex.Unlock()
 
 			// 			state.socket.close()
 		} else if state.State == SocketFinWait1 {
 			// If our FIN has been ACKed (perhaps in this segment), then
 			// enter TIME-WAIT, start the time-wait timer, turn off the other
 			// timers; otherwise enter the CLOSING state.
+			StateTableMutex.Lock()
 			state.State = SocketClosing
+			StateTableMutex.Unlock()
 		} else if state.State == SocketFinWait2 {
 			state.RecvNext++
 
@@ -686,7 +708,9 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 
 			// Enter the TIME-WAIT state.  Start the time-wait timer, turn
 			// off the other timers.
+			StateTableMutex.Lock()
 			state.State = SocketTimeWait
+			StateTableMutex.Unlock()
 		}
 
 		// we should only close when FIN but not FIN-ACK
@@ -723,7 +747,7 @@ func (c *Canary) tcpTimeoutDetector(ctx context.Context) {
                 case <-ctx.Done():
                         return
 
-                case <-time.After(time.Second * 5):
+                case <-time.After(time.Second * 60):
 			c.stateTable.Expire()
 		}
 	}
@@ -840,10 +864,8 @@ func (c *Canary) send(state *State, payload []byte, flags tcp.Flag) error {
 
 	data = append(data2, data...)
 
-	//c.m.Lock() REMOVE?
 	c.buffer.Write([]byte{byte((len(data) & 0xFF00) >> 8), byte(len(data) & 0xFF)})
 	c.buffer.Write(data)
-	//c.m.Unlock()
 
 	fd := c.descriptors[ae.Interface]
 
@@ -1026,9 +1048,7 @@ func (c *Canary) transmit(fd int32) error {
 	for {
 		buff := [2]byte{}
 
-		//c.m.Lock() REMOVE?
 		_, err := c.buffer.ReadAndMaybeAdvance(buff[:], true)
-		//c.m.Unlock()
 
 		if err == io.EOF {
 			break
@@ -1041,9 +1061,7 @@ func (c *Canary) transmit(fd int32) error {
 
 		buffer := make([]byte, len)
 
-		//c.m.Lock() REMOVE?
 		n, err := c.buffer.Read(buffer)
-		//c.m.Unlock()
 
 		if err != nil {
 			log.Errorf("Error reading buffer 2: %s", err)

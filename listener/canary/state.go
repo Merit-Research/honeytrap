@@ -20,7 +20,7 @@ import (
 	"net"
 	"sync"
 	"time"
-	//"fmt"
+	"fmt"
 
 	"github.com/honeytrap/honeytrap/listener/canary/tcp"
 	"github.com/honeytrap/honeytrap/event"
@@ -159,6 +159,7 @@ func (st *StateTable) Add(state *State) {
 // We focus only on SynReceived states.
 func (st *StateTable) Expire() {
 
+	count := make( map[SocketState]int)
 	now := time.Now()
 
 	StateTableMutex.Lock()
@@ -170,6 +171,13 @@ func (st *StateTable) Expire() {
 			continue
 		}
 
+		// Count the states we've seen
+		if _, ok := count[(*st)[i].State]; ok {
+			count[(*st)[i].State]++
+		} else {
+			count[(*st)[i].State] = 1
+		}
+
 		if now.Sub((*st)[i].t) > 30*time.Second  &&
 		     (*st)[i].State == SocketSynReceived {
 			// inactive
@@ -179,7 +187,7 @@ func (st *StateTable) Expire() {
 			(*st)[i].c.events.Send(event.New(
 				CanaryOptions,
 				EventCategoryTCP,
-				event.ConnectionOpened,
+				event.ConnectionTimeout,
 
 				event.SourceHardwareAddr((*st)[i].SrcHardwareAddr),
 				event.DestinationHardwareAddr((*st)[i].DestHardwareAddr),
@@ -196,6 +204,8 @@ func (st *StateTable) Expire() {
 		}
 
 	}
+
+	fmt.Println("States counter: ", count)
 }
 
 // Get will return the state for the ip, port combination
