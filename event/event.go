@@ -40,6 +40,7 @@ var (
 	ConnectionOpened     = Type("CONNECTION:OPENED")
 	ConnectionClosed     = Type("CONNECTION:CLOSED")
 	ConnectionTimeout    = Type("CONNECTION:SYN_RCVD:TIMEOUT")
+	ConnectionReset      = Type("CONNECTION:SYN_RCVD:RST")
 	UserSessionOpened    = Type("SESSION:USER:OPENED")
 	UserSessionClosed    = Type("SESSION:USER:CLOSED")
 	ConnectionReadError  = Type("CONNECTION:ERROR:READ")

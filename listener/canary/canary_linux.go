@@ -429,6 +429,21 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			StateTableMutex.Lock()
 			state.State = SocketListen
 			StateTableMutex.Unlock()
+                        // Send the event to our subscribers
+                        state.c.events.Send(event.New(
+                                CanaryOptions,
+                                EventCategoryTCP,
+                                event.ConnectionReset,
+
+                                event.SourceHardwareAddr(state.SrcHardwareAddr),
+                                event.DestinationHardwareAddr(state.DestHardwareAddr),
+
+                                event.SourceIP(state.SrcIP),
+                                event.DestinationIP(state.DestIP),
+                                event.SourcePort(state.SrcPort),
+                                event.DestinationPort(state.DestPort),
+                                // event.Payload(buff[:n]),
+                        ))
 			return nil
 		}
 
@@ -764,7 +779,7 @@ func (c *Canary) knockTimeoutDetector(ctx context.Context) {
                 case <-ctx.Done():
                         return
 
-                case <-time.After(time.Second * 600):
+                case <-time.After(time.Second * 300):
                         now := time.Now()
 
 			fmt.Println("Waking up to check for knocks that have timed-out.")
@@ -774,9 +789,9 @@ func (c *Canary) knockTimeoutDetector(ctx context.Context) {
                         c.knocks.Each(func(i int, v interface{}) {
                                 k := v.(*KnockGroup)
 
-                                // Remove / expire knock group if older than 600 secs
+                                // Remove / expire knock group if older than 300 secs
                                 // We also report the portscan in the events channel
-                                if k.Last.Add(time.Second * 600).Before(now) { // last + 600 < now <=> 600 < now - last =: age
+                                if k.Last.Add(time.Second * 300).Before(now) { // last + 300 < now <=> 300 < now - last =: age
 					expired++
                                         defer c.knocks.Remove(k)
 
