@@ -766,7 +766,7 @@ func (c *Canary) tcpTimeoutDetector(ctx context.Context) {
                 case <-ctx.Done():
                         return
 
-                case <-time.After(time.Second * 60):
+                case <-time.After(time.Second * 30):
 			c.stateTable.Expire()
 		}
 	}
