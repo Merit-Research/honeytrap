@@ -16,14 +16,14 @@
 package canary
 
 import (
+	"fmt"
 	"math/rand"
 	"net"
 	"sync"
 	"time"
-	"fmt"
 
-	"github.com/honeytrap/honeytrap/listener/canary/tcp"
 	"github.com/honeytrap/honeytrap/event"
+	"github.com/honeytrap/honeytrap/listener/canary/tcp"
 )
 
 // State defines a struct for holding connection data and address.
@@ -140,8 +140,10 @@ func (st *StateTable) Add(state *State) {
 	now := time.Now()
 
 	for i := range *st {
-		if now.Sub((*st)[i].t) > 30*time.Second {
-			// inactive
+		if now.Sub((*st)[i].t) > 30*time.Second &&
+			(*st)[i].State == SocketSynReceived {
+			// inactive (and NOT in SynReceived state; this precludes the change of NOT reporting a scanner that took us to SynReceived state.
+			// This scanner will be reported when the timeout expires---see Expire() function)
 		} else {
 			continue
 		}
@@ -179,7 +181,7 @@ func (st *StateTable) Expire() {
 		}
 
 		if now.Sub((*st)[i].t) > 30*time.Second  &&
-		     (*st)[i].State == SocketSynReceived {
+			(*st)[i].State == SocketSynReceived  {
 			// inactive
 			//fmt.Println((*st)[i].SrcIP, (*st)[i].SrcPort, (*st)[i].DestIP, (*st)[i].DestPort)
 
@@ -198,6 +200,16 @@ func (st *StateTable) Expire() {
 				event.DestinationPort((*st)[i].DestPort),
 				// event.Payload(buff[:n]),
 			))
+
+			// Remove the state
+			(*st)[i] = nil
+			continue
+		}
+
+		if now.Sub((*st)[i].t) > 30*time.Second  &&
+			((*st)[i].State == SocketFinWait1 ||
+				(*st)[i].State == SocketFinWait2) {
+			// inactive
 
 			// Remove the state
 			(*st)[i] = nil

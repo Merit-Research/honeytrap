@@ -133,6 +133,9 @@ type Canary struct {
 	stateTable StateTable
 
 	// txqueue *Queue  <unused>
+
+	// DEBUG
+	stateTransitionCounter map[string]int32
 }
 
 /*
@@ -141,6 +144,18 @@ type Queue struct {
 	packets []interface{}
 }
 */
+
+// DEBUG
+func stCount(count map[string]int32, fromtostate string)  error {
+	        // Count the states we've seen
+                if _, ok := count[fromtostate]; ok {
+                        count[fromtostate]++
+                } else {
+                        count[fromtostate] = 1
+                }
+		return nil
+	}
+
 
 // Taken from https://github.com/xiezhenye/harp/blob/master/src/arp/arp.go#L53
 func htons(n uint16) uint16 {
@@ -364,6 +379,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		// no state found
 		state = c.NewState(iph.Src, hdr.Source, iph.Dst, hdr.Destination)
 		StateTableMutex.Lock()
+		stCount(c.stateTransitionCounter, "Closed->Listen")
 		state.State = SocketListen
 		StateTableMutex.Unlock()
 		c.stateTable.Add(state)
@@ -407,14 +423,15 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 	if state.State == SocketListen {
 		switch {
 		case hdr.HasFlag(tcp.SYN):
-			state.SendUnacknowledged = state.InitialSendSequenceNumber
-			state.SendNext = state.InitialSendSequenceNumber + 1
+			state.SendUnacknowledged = state.InitialSendSequenceNumber 
+			state.SendNext = state.InitialSendSequenceNumber
 
 			state.RecvNext = hdr.SeqNum
 			state.RecvNext++
 			c.send(state, []byte{}, tcp.SYN|tcp.ACK)
 			state.SendNext++
 			StateTableMutex.Lock()
+			stCount(c.stateTransitionCounter, "Listen->SynRecvd")
 			state.State = SocketSynReceived
 			StateTableMutex.Unlock()
 			return nil
@@ -428,6 +445,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			// enter listen state
 			StateTableMutex.Lock()
 			state.State = SocketListen
+			stCount(c.stateTransitionCounter, "SynRecvd->Listen")
 			StateTableMutex.Unlock()
                         // Send the event to our subscribers
                         state.c.events.Send(event.New(
@@ -458,6 +476,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			// "connection reset" signal.  Enter the CLOSED state, delete the
 			// TCB, and return.
 			StateTableMutex.Lock()
+			stCount(c.stateTransitionCounter, "RST->Closed")
 			state.State = SocketClosed
 			StateTableMutex.Unlock()
 
@@ -469,6 +488,7 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 			// If the RST bit is set then, enter the CLOSED state, delete the
 			// TCB, and return.
 			StateTableMutex.Lock()
+			stCount(c.stateTransitionCounter, "RST->Closed")
 			state.State = SocketClosed
 			StateTableMutex.Unlock()
 
@@ -504,241 +524,251 @@ func (c *Canary) handleTCP(eh *ethernet.Frame, iph *ipv4.Header, data []byte) er
 		return nil
 	}
 
-	// check the ACK field
-	if !hdr.HasFlag(tcp.ACK) {
-		// if the ACK bit is off drop the segment and return
-		return nil
-	}
+	switch {
+		// check the ACK field
+		case hdr.HasFlag(tcp.ACK):
 
-	if state.State == SocketClosing {
-		StateTableMutex.Lock()
-		state.State = SocketTimeWait
-		StateTableMutex.Unlock()
-	}
+			if state.State == SocketClosing {
+				StateTableMutex.Lock()
+				stCount(c.stateTransitionCounter, "Closing->TimeWait")
+				state.State = SocketTimeWait
+				StateTableMutex.Unlock()
+			}
 
-	if state.State == SocketCloseWait {
-		c.stateTable.Remove(state)
-	}
+			if state.State == SocketCloseWait {
+				c.stateTable.Remove(state)
+			}
 
-	if state.State == SocketSynReceived {
-		if state.SendUnacknowledged <= hdr.AckNum &&
-			hdr.AckNum <= state.SendNext {
-			StateTableMutex.Lock()
-			state.State = SocketEstablished
-			StateTableMutex.Unlock()
-		} else {
-			// If the segment acknowledgment is not acceptable, form a
-			// reset segment,
-			// <SEQ=SEG.ACK><CTL=RST>
-			// and send it.
-			return nil
-		}
+			if state.State == SocketSynReceived {
+				if state.SendUnacknowledged <= hdr.AckNum &&
+					hdr.AckNum <= state.SendNext {
+					StateTableMutex.Lock()
+					stCount(c.stateTransitionCounter, "SynRecvd->ESTABLISHED")
+					state.State = SocketEstablished
+					StateTableMutex.Unlock()
+				} else {
+					// If the segment acknowledgment is not acceptable, form a
+					// reset segment,
+					// <SEQ=SEG.ACK><CTL=RST>
+					// and send it.
+					return nil
+				}
 
-		// listen handler,
-		// linux works with syn queue
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("Recovered from panic: %+v", r)
+				// listen handler,
+				// linux works with syn queue
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Error("Recovered from panic: %+v", r)
 
-					message := event.Message("%+v", r)
-					if err, ok := r.(error); ok {
-						message = event.Message("%+v", err)
+							message := event.Message("%+v", r)
+							if err, ok := r.(error); ok {
+								message = event.Message("%+v", err)
+							}
+
+							c.events.Send(event.New(
+								CanaryOptions,
+								EventCategoryTCP,
+								event.SeverityFatal,
+								event.SourceHardwareAddr(eh.Source),
+								event.DestinationHardwareAddr(eh.Destination),
+								event.SourceIP(state.SrcIP),
+								event.DestinationIP(state.DestIP),
+								event.SourcePort(state.SrcPort),
+								event.DestinationPort(state.DestPort),
+								event.Stack(),
+								message,
+								// event.Payload(buff[:n]),
+							))
+						}
+					}()
+
+					// we can check als for signaturs to use specifiec protocol
+					handlers := map[uint16]func(net.Conn) error{
+					//	23:   c.DecodeTelnet,
+					//	80:   c.DecodeHTTP,
+					//	443:  c.DecodeHTTPS,
+					//	139:  c.DecodeNBTIP,
+					//	445:  c.DecodeSMBIP,
+					//	1433: c.DecodeMSSQL,
+					//	6379: c.DecodeRedis,
+					//	9200: c.DecodeElasticsearch,
 					}
 
-					c.events.Send(event.New(
-						CanaryOptions,
-						EventCategoryTCP,
-						event.SeverityFatal,
-						event.SourceHardwareAddr(eh.Source),
-						event.DestinationHardwareAddr(eh.Destination),
-						event.SourceIP(state.SrcIP),
-						event.DestinationIP(state.DestIP),
-						event.SourcePort(state.SrcPort),
-						event.DestinationPort(state.DestPort),
-						event.Stack(),
-						message,
-						// event.Payload(buff[:n]),
-					))
+					if fn, ok := handlers[hdr.Destination]; !ok {
+						buff := make([]byte, 2048)
+
+						rdr := state.socket // io.TeeReader(state.socket, os.Stdout)
+						n, _ := rdr.Read(buff)
+
+						w := bufio.NewWriter(state.socket)
+						//w.WriteString("test")
+						w.Flush()
+
+						state.socket.Close()
+
+						c.events.Send(event.New(
+							CanaryOptions,
+							EventCategoryTCP,
+							event.ServiceStarted,
+							event.Protocol("tcp"),
+							event.SourceHardwareAddr(eh.Source),
+							event.DestinationHardwareAddr(eh.Destination),
+							event.SourceIP(state.SrcIP),
+							event.DestinationIP(state.DestIP),
+							event.SourcePort(state.SrcPort),
+							event.DestinationPort(state.DestPort),
+							event.Payload(buff[:n]),
+						))
+
+					} else if err := fn(state.socket); err != nil {
+						_ = fn
+					}
+				}()
+			}
+
+			// SocketEstablished
+			// If SND.UNA < SEG.ACK =< SND.NXT then, set SND.UNA <- SEG.ACK.
+
+			if state.SendUnacknowledged <= hdr.AckNum &&
+				hdr.AckNum <= state.SendNext {
+				state.SendUnacknowledged = hdr.AckNum
+			}
+
+			// Any segments on the retransmission queue which are thereby
+			// entirely acknowledged are removed.  Users should receive
+			// positive acknowledgments for buffers which have been SENT and
+			// fully acknowledged (i.e., SEND buffer should be returned with
+			// 	"ok" response).
+
+			// retransmission queue
+
+			// If the ACK is a duplicate
+			// (SEG.ACK < SND.UNA), it can be ignored.
+			//if hdr.AckNum < state.SendUnacknowledged {
+			//}
+
+			// If the ACK acks
+			// something not yet sent (SEG.ACK > SND.NXT) then send an ACK,
+			// drop the segment, and return.
+			//if hdr.AckNum > state.SendUnacknowledged {
+			//    is this necessary?
+			//    c.send(state, []byte{}, tcp.ACK)
+			//    return nil
+			//}
+
+			// If SND.UNA < SEG.ACK =< SND.NXT, the send window should be
+			// updated.  If (SND.WL1 < SEG.SEQ or (SND.WL1 = SEG.SEQ and
+			// 	SND.WL2 =< SEG.ACK)), set SND.WND <- SEG.WND, set
+			// SND.WL1 <- SEG.SEQ, and set SND.WL2 <- SEG.ACK.
+
+			// 	Note that SND.WND is an offset from SND.UNA, that SND.WL1
+			// records the sequence number of the last segment used to update
+			// SND.WND, and that SND.WL2 records the acknowledgment number of
+			// the last segment used to update SND.WND.  The check here
+			// prevents using old segments to update the window.
+
+			if state.State == SocketFinWait1 && !hdr.HasFlag(tcp.FIN) {
+				// In addition to the processing for the ESTABLISHED state, if
+				// our FIN is now acknowledged then enter FIN-WAIT-2 and continue
+				// processing in that state.
+				StateTableMutex.Lock()
+				state.State = SocketFinWait2
+				StateTableMutex.Unlock()
+			} else if state.State == SocketFinWait1 && hdr.HasFlag(tcp.FIN) {
+				StateTableMutex.Lock()
+				state.State = SocketTimeWait
+				StateTableMutex.Unlock()
+				state.RecvNext++
+				c.send(state, []byte{}, tcp.ACK)
+			}
+
+			if state.State == SocketEstablished ||
+				state.State == SocketFinWait1 ||
+				state.State == SocketFinWait2 {
+
+				state.socket.write(hdr.Payload)
+
+				switch {
+				case hdr.HasFlag(tcp.PSH):
+					state.socket.flush()
 				}
-			}()
 
-			// we can check als for signaturs to use specifiec protocol
-			handlers := map[uint16]func(net.Conn) error{
-			//	23:   c.DecodeTelnet,
-			//	80:   c.DecodeHTTP,
-			//	443:  c.DecodeHTTPS,
-			//	139:  c.DecodeNBTIP,
-			//	445:  c.DecodeSMBIP,
-			//	1433: c.DecodeMSSQL,
-			//	6379: c.DecodeRedis,
-			//	9200: c.DecodeElasticsearch,
+				// Once the TCP takes responsibility for the data it advances
+				// RCV.NXT over the data accepted, and adjusts RCV.WND as
+				// apporopriate to the current buffer availability.  The total of
+				// RCV.NXT and RCV.WND should not be reduced.
+				state.RecvNext += uint32(len(hdr.Payload))
+				// state.ReceiveWindow = state.socket.bufferavailable() //  hdr.Payload
+
+				// TODO: not in spec, but what should we do? otherwise
+				// it will ACK to the SYN, SYNACK, ACK
+				if len(hdr.Payload) > 0 {
+					// This acknowledgment should be piggybacked on a segment being
+					// transmitted if possible without incurring undue delay.
+					//fmt.Printf("ACK'ing %d %d\n", state.SendNext, state.RecvNext)
+					c.send(state, []byte{}, tcp.ACK)
+				}
 			}
 
-			if fn, ok := handlers[hdr.Destination]; !ok {
-				buff := make([]byte, 2048)
+		case hdr.Ctrl&tcp.FIN == tcp.FIN:
+			// If the FIN bit is set, signal the user "connection closing" and
+			// return any pending RECEIVEs with same message, advance RCV.NXT
+			// over the FIN, and Option an acknowledgment for the FIN.  Note that
+			// FIN implies PUSH for any segment text not yet delivered to the
+			// user.
+			state.RecvNext = hdr.SeqNum
 
-				rdr := state.socket // io.TeeReader(state.socket, os.Stdout)
-				n, _ := rdr.Read(buff)
+			if state.State == SocketSynReceived || state.State == SocketEstablished {
+				// Enter the CLOSE-WAIT state.
+				state.socket.flush()
+				state.socket.close()
 
-				w := bufio.NewWriter(state.socket)
-				//w.WriteString("test")
-				w.Flush()
+				state.RecvNext++
+				// c.send(state, []byte{}, tcp.SYN|tcp.ACK)
+				c.send(state, []byte{}, tcp.FIN|tcp.ACK)
+				state.SendNext++
 
-				state.socket.Close()
+				StateTableMutex.Lock()
+				stCount(c.stateTransitionCounter, "SynRecvd|ESTABLISHED->CloseWait")
+				state.State = SocketCloseWait
+				StateTableMutex.Unlock()
 
-				c.events.Send(event.New(
-					CanaryOptions,
-					EventCategoryTCP,
-					event.ServiceStarted,
-					event.Protocol("tcp"),
-					event.SourceHardwareAddr(eh.Source),
-					event.DestinationHardwareAddr(eh.Destination),
-					event.SourceIP(state.SrcIP),
-					event.DestinationIP(state.DestIP),
-					event.SourcePort(state.SrcPort),
-					event.DestinationPort(state.DestPort),
-					event.Payload(buff[:n]),
-				))
+				// 			state.socket.close()
+			} else if state.State == SocketFinWait1 {
+				// If our FIN has been ACKed (perhaps in this segment), then
+				// enter TIME-WAIT, start the time-wait timer, turn off the other
+				// timers; otherwise enter the CLOSING state.
 
-			} else if err := fn(state.socket); err != nil {
-				_ = fn
+				state.RecvNext++
+				//fmt.Printf("(socketfinwait)ACK'ing %d %d\n", state.SendNext, state.RecvNext)
+				c.send(state, []byte{}, tcp.ACK)
+
+				StateTableMutex.Lock()
+				state.State = SocketClosing
+				StateTableMutex.Unlock()
+			} else if state.State == SocketFinWait2 {
+				state.RecvNext++
+
+				//fmt.Printf("(socketfinwait)ACK'ing %d %d\n", state.SendNext, state.RecvNext)
+				c.send(state, []byte{}, tcp.ACK)
+
+				// Enter the TIME-WAIT state.  Start the time-wait timer, turn
+				// off the other timers.
+				StateTableMutex.Lock()
+				stCount(c.stateTransitionCounter, "FinWait2->TimeWait")
+				fmt.Println("STATE: TIME-WAIT")
+				state.State = SocketTimeWait
+				StateTableMutex.Unlock()
 			}
-		}()
-	}
 
-	// SocketEstablished
-	// If SND.UNA < SEG.ACK =< SND.NXT then, set SND.UNA <- SEG.ACK.
-
-	if state.SendUnacknowledged <= hdr.AckNum &&
-		hdr.AckNum <= state.SendNext {
-		state.SendUnacknowledged = hdr.AckNum
-	}
-
-	// Any segments on the retransmission queue which are thereby
-	// entirely acknowledged are removed.  Users should receive
-	// positive acknowledgments for buffers which have been SENT and
-	// fully acknowledged (i.e., SEND buffer should be returned with
-	// 	"ok" response).
-
-	// retransmission queue
-
-	// If the ACK is a duplicate
-	// (SEG.ACK < SND.UNA), it can be ignored.
-	//if hdr.AckNum < state.SendUnacknowledged {
-	//}
-
-	// If the ACK acks
-	// something not yet sent (SEG.ACK > SND.NXT) then send an ACK,
-	// drop the segment, and return.
-	//if hdr.AckNum > state.SendUnacknowledged {
-	//    is this necessary?
-	//    c.send(state, []byte{}, tcp.ACK)
-	//    return nil
-	//}
-
-	// If SND.UNA < SEG.ACK =< SND.NXT, the send window should be
-	// updated.  If (SND.WL1 < SEG.SEQ or (SND.WL1 = SEG.SEQ and
-	// 	SND.WL2 =< SEG.ACK)), set SND.WND <- SEG.WND, set
-	// SND.WL1 <- SEG.SEQ, and set SND.WL2 <- SEG.ACK.
-
-	// 	Note that SND.WND is an offset from SND.UNA, that SND.WL1
-	// records the sequence number of the last segment used to update
-	// SND.WND, and that SND.WL2 records the acknowledgment number of
-	// the last segment used to update SND.WND.  The check here
-	// prevents using old segments to update the window.
-
-	if state.State == SocketFinWait1 {
-		// In addition to the processing for the ESTABLISHED state, if
-		// our FIN is now acknowledged then enter FIN-WAIT-2 and continue
-		// processing in that state.
-		StateTableMutex.Lock()
-		state.State = SocketFinWait2
-		StateTableMutex.Unlock()
-	} else if state.State == SocketFinWait2 {
-		StateTableMutex.Lock()
-		state.State = SocketTimeWait
-		StateTableMutex.Unlock()
-	}
-
-	if state.State == SocketEstablished ||
-		state.State == SocketFinWait1 ||
-		state.State == SocketFinWait2 {
-
-		state.socket.write(hdr.Payload)
-
-		switch {
-		case hdr.HasFlag(tcp.PSH):
-			state.socket.flush()
-		}
-
-		// Once the TCP takes responsibility for the data it advances
-		// RCV.NXT over the data accepted, and adjusts RCV.WND as
-		// apporopriate to the current buffer availability.  The total of
-		// RCV.NXT and RCV.WND should not be reduced.
-		state.RecvNext += uint32(len(hdr.Payload))
-		// state.ReceiveWindow = state.socket.bufferavailable() //  hdr.Payload
-
-		// TODO: not in spec, but what should we do? otherwise
-		// it will ACK to the SYN, SYNACK, ACK
-		if len(hdr.Payload) > 0 {
-			// This acknowledgment should be piggybacked on a segment being
-			// transmitted if possible without incurring undue delay.
-			// fmt.Printf("ACK'ing %d %d\n", state.SendNext, state.RecvNext)
-			c.send(state, []byte{}, tcp.ACK)
-		}
-	}
-
-	if hdr.Ctrl&tcp.FIN == tcp.FIN {
-		// If the FIN bit is set, signal the user "connection closing" and
-		// return any pending RECEIVEs with same message, advance RCV.NXT
-		// over the FIN, and Option an acknowledgment for the FIN.  Note that
-		// FIN implies PUSH for any segment text not yet delivered to the
-		// user.
-		state.RecvNext = hdr.SeqNum
-
-		if state.State == SocketSynReceived || state.State == SocketEstablished {
-			// Enter the CLOSE-WAIT state.
-			state.socket.flush()
-			state.socket.close()
-
-			state.RecvNext++
-			// c.send(state, []byte{}, tcp.SYN|tcp.ACK)
-			c.send(state, []byte{}, tcp.FIN|tcp.ACK)
-			state.SendNext++
-
-			StateTableMutex.Lock()
-			state.State = SocketCloseWait
-			StateTableMutex.Unlock()
-
-			// 			state.socket.close()
-		} else if state.State == SocketFinWait1 {
-			// If our FIN has been ACKed (perhaps in this segment), then
-			// enter TIME-WAIT, start the time-wait timer, turn off the other
-			// timers; otherwise enter the CLOSING state.
-			StateTableMutex.Lock()
-			state.State = SocketClosing
-			StateTableMutex.Unlock()
-		} else if state.State == SocketFinWait2 {
-			state.RecvNext++
-
-			// fmt.Printf("(socketfinwait)ACK'ing %d %d\n", state.SendNext, state.RecvNext)
-			c.send(state, []byte{}, tcp.ACK)
-
-			// Enter the TIME-WAIT state.  Start the time-wait timer, turn
-			// off the other timers.
-			StateTableMutex.Lock()
-			state.State = SocketTimeWait
-			StateTableMutex.Unlock()
-		}
-
-		// we should only close when FIN but not FIN-ACK
-		// set state status s.FINWAIT
-		// state.socket.close()
-	} else {
-		// remove states
-		// FIN / RST
-		return nil
+			// we should only close when FIN but not FIN-ACK
+			// set state status s.FINWAIT
+			// state.socket.close()
+		default: 
+			// remove states
+			// FIN / RST
+			return nil
 	}
 	/*
 		if hdr.Ctrl&tcp.RST == tcp.RST {
@@ -1016,6 +1046,9 @@ func New(options ...func(listener.Listener) error) (listener.Listener, error) {
 	networkInterfaces := []net.Interface{}
 	descriptors := map[string]int32{}
 
+	// DEBUG
+	stateTransitionCounter := map[string]int32{}
+
 	r := rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 
 	l := &Canary{
@@ -1023,6 +1056,7 @@ func New(options ...func(listener.Listener) error) (listener.Listener, error) {
 		rt:                rt,
 		epfd:              epfd,
 		descriptors:       descriptors,
+		stateTransitionCounter: stateTransitionCounter,
 		networkInterfaces: networkInterfaces,
 		r:                 r,
 		knockChan:         make(chan interface{}, 100),
