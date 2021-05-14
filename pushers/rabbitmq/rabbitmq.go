@@ -116,6 +116,6 @@ func (b *AMQPObject) Send(e event.Event) {
 	)
 	if err != nil {
 		log.Errorf("Failed to send event: %s", err.Error())
-		return
+		panic(err)
 	}
 }
