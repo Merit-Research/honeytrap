@@ -141,7 +141,7 @@ func (st *StateTable) Add(state *State) {
 
 	for i := range *st {
 		if now.Sub((*st)[i].t) > 30*time.Second &&
-			(*st)[i].State == SocketSynReceived {
+			(*st)[i].State != SocketSynReceived {
 			// inactive (and NOT in SynReceived state; this precludes the change of NOT reporting a scanner that took us to SynReceived state.
 			// This scanner will be reported when the timeout expires---see Expire() function)
 		} else {
